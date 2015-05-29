@@ -1,0 +1,311 @@
+---
+Title       : Airfoil Self Noise Prediction using Machine Learning Algorithms
+Subtitle    : NACA 0012 Airfoil Noise Prediction
+Author      : Srisai Sivakumar
+Job         : Aerodynamics Engineer turned Machine Learning Enthusiast
+Date: "Friday, May 29, 2015"
+Output: html_document
+---
+
+## NACA 0012 Airfoil Noise Prediction based on Wind Tunnel Testing
+
+- NASA data set, obtained from a series of aerodynamic and acoustic tests of two and three-dimensional airfoil sections conducted in an anechoic wind tunnel. The data set comprises different size NACA 0012 airfoils at various wind tunnel speeds and angles of attack. The span of the airfoil and the observer position were the same in all of the experiments.
+
+The following measurements have been made from the wind tunnel:
+
+1. Frequency, in Hertzs. 
+2. Angle of attack, in degrees. 
+3. Chord length, in meters. 
+4. Free-stream velocity, in meters per second. 
+5. Suction side displacement thickness, in meters. 
+
+The only output is: 
+
+6. Scaled sound pressure level, in decibels. 
+
+The entire dataset is available from the [UCI Machine Learning Repository](https://archive.ics.uci.edu/ml/datasets/Airfoil+Self-Noise). The following are some relevant papers on the dataset:
+
+T.F. Brooks, D.S. Pope, and A.M. Marcolini. 
+Airfoil self-noise and prediction. 
+Technical report, NASA RP-1218, July 1989. 
+
+K. Lau. 
+A neural networks approach for aerofoil noise prediction. 
+Masters thesis, Department of Aeronautics. 
+Imperial College of Science, Technology and Medicine (London, United Kingdom), 2006. 
+
+R. Lopez. 
+Neural Networks for Variational Problems in Engineering. 
+PhD Thesis, Technical University of Catalonia, 2008. 
+
+## Motivation for current work
+
+Noise is fast becoming a major constraint to the modern wind turbines. As rotors get larger, its inadvertible that the tip speeds gets quite high resulting in noisy operation. This poses a severe constraint on the location of the wind farm, potentially rendering an otherwise favourable site unfavourable.
+
+Modern turbines breaching the [100dB](http://www.gereports.com/post/92442325225/how-loud-is-a-wind-turbine) threshold (almost as loud as a snow mobile or a chain saw), noise is a crucial factor in the design of modern airfoils for wind turbines. 
+
+The current industry practice is to use simple semi-emperical aeroacoustic prediction tools dedicated to trailing-edge noise and integrate results in the design cycle. Full scale Navier Stokes modelling of airfoils and blades are possible, but are highly resource intensive and sensitive to initial & boundary conditions. Additionally the fine details of the trailing edge boundary layer behaviour are quite hard capture, requiring very fine mesh.
+
+Wind tunnel tests provide an alternate, reliable albeit expensive way to experimentally measure the noise of the airfoils under operating conditions.
+
+## Current Methodology
+
+The objective of this analysis is to find a parsimonious model that satisfactorily predicts the Noise (in dB) profuced by the NACA 0012 airfoil under a set of operating conditions and frequencies.
+
+The process would involve a combination of exploring the possible interactions between variables via exploratory graphs, splitting the data into training and test, determining and eliminating "low influence" variables, etc.
+
+Lattice and CARET package would be used for extensively for these operations. Regression, Random Forest, Boosting and Bagging models will be developed and their predictions are compared.
+
+## Set-up
+
+```{r echo = T, results = 'asis'}
+library(caret)
+library(lattice)
+library(manipulate)
+library(xtable)
+dat <- read.table(
+        "C:/Users/S.Srisai/Documents/working_directory/R/datasets/airfoil_noise/airfoil_self_noise.dat")
+
+names(dat) <- c("frequency","aoa","chord","vinf","delta","noise")
+
+```
+
+## Identifying Correlated Variables
+
+The next step is identifying any correlated variables.
+
+```{r echo = T, results = 'asis',warning=FALSE}
+descrCor <-  cor(dat)
+summary(descrCor[upper.tri(descrCor)])
+# Check for perfect correlation
+highCorr <- sum(abs(descrCor[upper.tri(descrCor)]) > .999)
+sum(highCorr)
+# find highly correlated variables- correlation cut-off set at 0.75
+highlyCorDescr <- findCorrelation(descrCor, cutoff = .75)
+sum(highlyCorDescr)
+
+# Ascertaining the correlations
+
+xyplot(delta~aoa,dat,grid=T,type = c("p", "smooth"),, col.line = "darkorange",lwd = 2)
+# dat<- dat[,-highlyCorDescr]
+# aoa was removed,instead of delta. So manually eliminating delta instead of aoa.
+dat <- dat[,-5]
+
+```
+
+## Reynolds Number
+
+Two of the measured input variables are Chord and Free Stream Velocity. Both can be summarized and replaced by Reynolds Number as its defined as:
+
+Re = Free Stream Velocity * Characteristic Length/Kinematic Viscosity
+
+Kinematic Viscosity for air at 300K (27°C) is noted as 1.568e-5 from [Engineering Toolbox](http://www.engineeringtoolbox.com/dry-air-properties-d_973.html)
+
+Re will replace Vinf and C
+
+## Mutating Re and removing C and Vinf
+
+Re = V_inf * C / nu
+
+```{r echo = T, results = 'asis'}
+nu <- 1.568e-5 
+dat$re <- dat$chord * dat$vinf / nu
+dat <- dat[,-c(3,4)]
+dat <- dat[,c(1:2,4,3)]
+names(dat)
+```
+
+## Exploratory Plots
+
+```{r echo = F, results = 'asis',warning=FALSE}
+xyplot(noise ~ frequency|as.factor(aoa), dat, grid = TRUE, group = re)
+
+xyplot(noise ~ log10(frequency)|as.factor(aoa), dat, grid = TRUE, group = re,
+       type = c("p", "smooth"), col.line = "darkorange", lwd = 1)
+
+xyplot(noise ~ log10(frequency)|as.factor(round(re)), 
+               dat, grid = TRUE, group = aoa)
+```
+
+## Exploratory Plots: Observation
+
+The exploratory plots reveal the following pattern: 
+- The general trend is for all algles of attack, the noise increases with frequency, upto a frequency of around 1000-5000Hz, after which, the noise reduces with increasing frequency. 
+
+- The location of the peak of the noise Vs frequency curve roughly varies between 1000-5000Hz for all Reynolds number, and seems to be dependent on angle of attack.
+
+- As Reynolds NUmber increases, peak noise occurs at lower frequencies
+
+## Model Set-up: ZNV
+
+Before getting started with any modelling, its important to eliminate any predictors that take an unique value across samples or exhibit little variance. Such predictors are not only non-informative, it can break some models you may want to fit to your data. One solution is to remove all predictors that satisfy a threshold criterion related to their variance.
+
+By doing so, an explicit assumption is made that all those predictors are non-informative, which may not necessarily be true, especially for the near-zero variance ones. Those near-variance predictors can in fact turn out to be very informative. For example, assume that a binary predictor in a classification problem has lots of zeroes and few ones (near-variance predictor). 
+
+So caution is recommended while discarding such ZNV features.
+
+```{r echo = T, results = 'asis',warning=FALSE}
+NZV <- nearZeroVar(dat, saveMetrics= TRUE)
+print(xtable(NZV), type="HTML")
+# remove any NZVs
+data <- dat[,!NZV$nzv]
+```
+
+## Reproducibly setting up the training and test sets
+
+```{r echo = T, results = 'asis',warning=FALSE}
+
+set.seed(100)
+inTrain <- createDataPartition(y=data$noise, p=0.70, list=FALSE)
+training <- data[inTrain,]
+testing <- data[-inTrain,]
+
+```
+
+## Support function
+
+A suport function was implimented to handle the repeated task of getting plots and MSE of the predictions. It takes the model as argument and returns the In-sample and Out-of-sample errors of the model
+
+```{r echo = T,warning=FALSE}
+
+eval_model <- function(model) {
+        
+        pred_train <- predict(model,newdata = training)
+        pred_test <- predict(model,newdata = testing)
+        
+        # Scatter plots of predictions on Training and Testing sets
+        plot(pred_train,training$noise,xlim=c(100,150),ylim=c(100,150),col=1,
+             pch=19,xlab = "Predicted Noise (dB)",ylab = "Actual Noise(dB)")
+        points(pred_test,testing$noise,col=2,pch=19) 
+        leg <- c("Training","Testing")
+        legend(100, 150, leg, col = c(1, 2),pch=c(19,19))
+        
+        # Scatter plots of % error on predictions on Training and Testing sets
+        par(mfrow = c(2, 1))
+        par(cex = 0.6)
+        par(mar = c(5, 5, 3, 0), oma = c(2, 2, 2, 2))
+        plot((pred_train - training$noise)* 100 /training$noise,
+             ylab = "% Error of Prediction", xlab = "Index",
+             ylim = c(-5,5),col=1,pch=19)
+        legend(0, 4.5, "Training", col = 1,pch=19)
+        plot((pred_test-testing$noise)* 100 /testing$noise,
+             ylab = "% Error of Prediction",  xlab = "Index",
+             ylim = c(-5,5),col=2,pch=19)
+        legend(0, 4.5, "Testing", col = 2,pch=19)
+        
+        # Actual data Vs Predictions superimposed for Training and Testing Data
+        plot(1:length(training$noise),training$noise,pch=21,col=1,
+             main = "Training: Actual Noise Vs Predicted Noise",
+             xlab = "Index",ylab = "Noise (dB)")
+        points(1:length(training$noise),pred_train,pch=21,col=2)
+        #leg <- c("Training","Predicted Training")
+        legend(0, 140, c("Actual","Predicted"), col = c(1, 2),pch=c(21,21))
+        plot(1:length(testing$noise),testing$noise,pch=21,col=1,
+             main = "Testing: Actual Noise Vs Predicted Noise",
+             xlab = "Index",ylab = "Noise (dB)")
+        points(1:length(testing$noise),pred_test,pch=21,col="red")
+        legend(0, 140, c("Actual","Predicted"), col = c(1, 2),pch=c(21,21))
+        
+        ## Line graph of errors
+        plot(pred_train-training$noise,type='l',ylim=c(-5,+5),
+             xlab = "Index",ylab = "Actual - Predicted",main="Training")        
+        plot(pred_test-testing$noise,type='l',ylim=c(-5,+5),
+             xlab = "Index",ylab = "Actual - Predicted",main="Testing")
+                
+        ISRMSE<- sqrt(mean((pred_train-training$noise)^2))
+        OSRMSE<- sqrt(mean((pred_test-testing$noise)^2))
+        
+        return(c( ISRMSE,OSRMSE))
+}
+
+```
+
+## Regression- Caret
+
+```{r echo = T, results = 'asis',warning=FALSE,message=FALSE}
+
+ans_reg <- train(noise ~., data=training,method="lm")
+#summary(ans_reg)
+print(xtable(summary(ans_reg)), type="HTML")
+reg_r_adjusted <- summary(ans_reg)[9]
+reg_r_adjusted
+reg <- eval_model(ans_reg)
+reg
+
+```
+
+## Trees- Caret
+
+```{r echo = T, results = 'asis',warning=FALSE,message=FALSE}
+
+cvCtrl <- trainControl(method = "repeatedcv", repeats = 10)
+ans_tree <- train(noise ~ ., data = training, method = "rpart",
+                        tuneLength = 100, trControl = cvCtrl)
+tree <- eval_model(ans_tree)
+tree
+
+```
+
+## Boosting- caret
+
+```{r echo = T, results = 'asis',warning=FALSE,message=FALSE}
+
+fitControl <- trainControl(method = "cv", number = 5, verboseIter=F)
+gbmGrid <- expand.grid(interaction.depth = c(20,30,45), n.trees = 500, 
+                       shrinkage = .1, n.minobsinnode = 10)
+ans_boost <- train(noise ~ ., data = training,method = "gbm",
+                 trControl = fitControl, verbose = FALSE, tuneGrid = gbmGrid)
+plot(ans_boost)
+
+boost <- eval_model(ans_boost)
+boost
+
+```
+
+# Bagging- Caret
+
+```{r echo = T, results = 'asis',warning=FALSE,message=FALSE}
+
+ans_bag <- bag(training[,-7],training$noise, B = 10,
+               bagControl = bagControl(fit = ctreeBag$fit,
+                                       predict = ctreeBag$pred,
+                                       aggregate = ctreeBag$aggregate))
+bag <- eval_model(ans_bag)
+bag
+
+```
+
+## RF- Caret
+
+```{r echo = T, results = 'asis',warning=FALSE,message=FALSE}
+
+ans_rf1<- train(x=training[,-7],y=training$noise,method="rf",
+                trControl=trainControl(method = "cv", number = 4),
+                data=training,do.trace=F,ntree=250)
+rf <- eval_model(ans_rf1)
+rf
+
+```
+
+## Results and Summary
+
+```{r echo = T, results = 'asis',warning=FALSE,message=FALSE}
+
+answer <- data.frame(c("reg"=reg,"tree"=tree,"boost"=boost,"bag"=bag,"rf"=rf))
+names(answer) <- "answers"
+
+plot(c(reg[1],0),c(0,reg[2]),type='l',col=1,lwd=3,
+     xlab="In-Sample-Root-Mean-Squared-Error",
+     ylab="Out-of-Sample-Root-Mean-Squared-Error",
+     main="Model Root-Mean-Squared-Errors Comparison",
+     xlim=c(0.2,5.8),ylim=c(0.2,5.8))
+lines(c(tree[1],0),c(0,tree[2]),type='l',col=2,lwd=3)
+lines(c(boost[1],0),c(0,boost[2]),type='l',col=3,lwd=3)
+lines(c(bag[1],0),c(0,bag[2]),type='l',col=4,lwd=3)
+lines(c(rf[1],0),c(0,rf[2]),type='l',col=5,lwd=3)
+legend(3.93,6.02, c("Regression","Tree","Boosting","Bagging","Random Forest"),
+       col = c(1,2,3,4,5),lwd=c(3,3,3,3,3))
+
+```
+
+### Random Forest has clearly outperformed the rest of the prediction algorithms,both in In-sample Error and Out-of-sample error.
